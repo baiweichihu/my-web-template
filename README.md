@@ -52,4 +52,4 @@ To change what everyone sees on GitHub Pages by default, edit `src/siteData.js` 
 npm run build
 ```
 
-The site is configured for GitHub Pages under the `/my-web/` base path.
+The site uses a relative Vite base path, so it can be deployed from this template repository or from a generated repository without changing the repository name in config.
