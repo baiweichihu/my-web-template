@@ -32,7 +32,7 @@
 - [x] Add a clear homepage layout-tuning banner with an exit button.
 - [x] Make blocks gray and text unselectable while dragging or resizing.
 - [x] Add grid-based layout tuning with draggable and resizable snapped blocks.
-- [x] Replace free dragging with edge-button layout tuning.
+- [x] Replace edge-button layout tuning with pointer-based `react-moveable` drag and resize.
 - [x] Make layout mode text unselectable at all times.
 - [x] Auto-exit layout mode when leaving the console through the close button.
 - [x] Add GitHub-Flavored Markdown table rendering on the public page.
@@ -40,17 +40,25 @@
 - [x] Normalize layout updates to prevent overlaps while allowing floating blocks.
 - [x] Match layout tuning width to the public homepage container.
 - [x] Add save-current-layout and restore-default-layout buttons.
+- [x] Add persistent overlap warnings after layout drag or resize.
+- [x] Prevent layout saving when overlap issues are detected.
+- [x] Keep visibility controls out of content editing so visibility is managed only in the visibility tree.
+- [x] Use a draft layout while tuning; commit it only after the save check passes.
+- [x] Make the layout tuning action bar sticky near the top of the page.
+- [x] Move section and item ordering into a dedicated drag-and-drop content sorting view.
+- [x] Add reusable confirmation dialogs before deleting sections or items.
 
-## Known Issues
+## Resolved Issues
 
-- [ ] Layout tuning currently uses a fixed vertical movement unit, which makes vertical adjustments feel too rigid. A more flexible vertical sizing and movement model should be evaluated.
-- [ ] Exiting layout tuning may still require re-entering the console password in some flows. The unlocked console session should be preserved consistently when returning from layout tuning.
+- [x] Layout tuning no longer uses the original coarse vertical movement unit; vertical adjustment now uses a finer grid row while preserving a similar default visual height.
+- [x] Exiting layout tuning preserves the unlocked console session through sessionStorage, preventing password re-entry during the same browser session.
 
 ## Later Ideas
 
 - Add real content to replace placeholder profile, project, creative work, and timeline entries.
 - Add Japanese content support after the Chinese and English versions feel stable.
-- Add a guestbook when a backend or hosted comment provider is chosen.
+- Add a guestbook as a separate dynamic feature, likely backed by Appwrite.
 - Add richer project detail pages if the portfolio grows.
 - Add import/export for console settings so template users can persist configuration outside localStorage.
 - Add a generator command that writes console changes back into `src/siteData.js`.
+- Lazy-load the console-only editor libraries to reduce the public homepage bundle size.

@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import GridLayout from 'react-grid-layout/legacy';
+import Moveable from 'react-moveable';
 import ReactMarkdown from 'react-markdown';
 import rehypeRaw from 'rehype-raw';
 import remarkGfm from 'remark-gfm';
@@ -28,9 +28,13 @@ import {
   toolbarPlugin,
 } from '@mdxeditor/editor';
 import {
+  Check,
+  ChevronDown,
+  ChevronRight,
   Edit3,
   Eye,
   EyeOff,
+  GripVertical,
   LayoutGrid,
   Plus,
   Settings,
@@ -40,14 +44,18 @@ import {
   X,
 } from 'lucide-react';
 import 'bootstrap/dist/css/bootstrap.min.css';
-import 'react-grid-layout/css/styles.css';
-import 'react-resizable/css/styles.css';
 import '@mdxeditor/editor/style.css';
 import './styles.css';
 import { defaultContentItems, defaultSections } from './siteData';
 
 const CONSOLE_PASSWORD = 'password';
 const SETTINGS_KEY = 'my-web-template-settings';
+const CONSOLE_SESSION_KEY = 'my-web-console-unlocked';
+const LAYOUT_ROW_HEIGHT = 32;
+const DEFAULT_BLOCK_ROWS = 9;
+const MIN_BLOCK_ROWS = 4;
+const DEFAULT_LAYOUT_ITEM_HEIGHT = 280;
+const DEFAULT_LAYOUT_GAP = 16;
 
 const ui = {
   zh: {
@@ -61,7 +69,10 @@ const ui = {
     exitLayoutMode: '退出布局调整',
     saveLayout: '保存当前布局',
     resetLayout: '恢复默认布局',
+    defaultLayout: '默认',
     saved: '已保存',
+    layoutOverlap: '布局重叠',
+    layoutNoOverlap: '布局检查：未检测到重叠。',
     language: '语言',
     theme: '主题',
     light: '亮色',
@@ -79,6 +90,7 @@ const ui = {
     reset: '重置设置',
     wrongPassword: '密码不对。模板默认密码是 password，可以在源码里修改。',
     contentControl: '内容编辑',
+    contentSort: '内容排序',
     visibilityControl: '可见控制',
     addSection: '新增板块',
     addItem: '新增条目',
@@ -86,6 +98,9 @@ const ui = {
     cancel: '取消',
     save: '保存',
     edit: '编辑',
+    confirmDeleteTitle: '确认删除',
+    confirmDeleteMessage: '是否确认删除“{name}”？此操作无法撤销。',
+    confirmDelete: '确认删除',
     deleteSection: '删除板块',
     deleteItem: '删除条目',
     visible: '可见',
@@ -100,6 +115,8 @@ const ui = {
     timelineType: '时间线',
     itemCount: '条目',
     noItems: '暂无条目',
+    dragToSort: '拖动长条调整顺序，点保存后生效。',
+    sortSaved: '排序已保存',
     markdownEditor: 'Markdown 编辑器',
     templateNote: '控制台修改会先保存在当前浏览器。要成为模板默认内容，请同步修改 src/siteData.js。',
   },
@@ -114,7 +131,10 @@ const ui = {
     exitLayoutMode: 'Exit Layout Tuning',
     saveLayout: 'Save Layout',
     resetLayout: 'Restore Default',
+    defaultLayout: 'Default',
     saved: 'Saved',
+    layoutOverlap: 'Layout overlap',
+    layoutNoOverlap: 'Layout check: no overlap detected.',
     language: 'Language',
     theme: 'Theme',
     light: 'Light',
@@ -132,6 +152,7 @@ const ui = {
     reset: 'Reset Settings',
     wrongPassword: 'Wrong password. The template default is password and can be changed in source code.',
     contentControl: 'Content Editing',
+    contentSort: 'Content Sorting',
     visibilityControl: 'Visibility Control',
     addSection: 'Add Section',
     addItem: 'Add Item',
@@ -139,6 +160,9 @@ const ui = {
     cancel: 'Cancel',
     save: 'Save',
     edit: 'Edit',
+    confirmDeleteTitle: 'Confirm Delete',
+    confirmDeleteMessage: 'Are you sure you want to delete "{name}"? This cannot be undone.',
+    confirmDelete: 'Delete',
     deleteSection: 'Delete Section',
     deleteItem: 'Delete Item',
     visible: 'Visible',
@@ -153,6 +177,8 @@ const ui = {
     timelineType: 'Timeline',
     itemCount: 'items',
     noItems: 'No items',
+    dragToSort: 'Drag rows to reorder. Changes apply after saving.',
+    sortSaved: 'Sorting saved',
     markdownEditor: 'Markdown Editor',
     templateNote: 'Console changes are saved in this browser first. To make them template defaults, update src/siteData.js too.',
   },
@@ -236,6 +262,10 @@ function sortByOrder(records) {
   return [...records].sort((a, b) => Number(a.order ?? 0) - Number(b.order ?? 0));
 }
 
+function resequence(records) {
+  return records.map((record, index) => ({ ...record, order: index + 1 }));
+}
+
 function sectionNumber(index) {
   return String(index + 1).padStart(2, '0');
 }
@@ -247,12 +277,112 @@ function readImageFile(file, onLoad) {
   reader.readAsDataURL(file);
 }
 
+function rectsOverlap(a, b) {
+  return (
+    a.id !== b.id &&
+    a.left < b.left + b.width &&
+    a.left + a.width > b.left &&
+    a.top < b.top + b.height &&
+    a.top + a.height > b.top
+  );
+}
+
+function findLayoutOverlaps(layoutItems) {
+  const issues = [];
+  for (let i = 0; i < layoutItems.length; i += 1) {
+    for (let j = i + 1; j < layoutItems.length; j += 1) {
+      if (rectsOverlap(layoutItems[i], layoutItems[j])) {
+        issues.push([layoutItems[i].id, layoutItems[j].id]);
+      }
+    }
+  }
+  return issues;
+}
+
+function formatLayoutIssue(issues, text) {
+  return `${text.layoutOverlap}: ${issues.map((pair) => pair.join(' / ')).join(', ')}`;
+}
+
+function buildDefaultPixelLayout(panels, containerWidth) {
+  const columnGap = DEFAULT_LAYOUT_GAP;
+  const columnWidth = (containerWidth - columnGap) / 2;
+  const layoutItems = [];
+  let y = 0;
+  let column = 0;
+
+  panels.forEach((panel) => {
+    const wide = panel.section.id === 'profile' || panel.section.id === 'timeline';
+    if (wide) {
+      if (column !== 0) {
+        y += DEFAULT_LAYOUT_ITEM_HEIGHT + columnGap;
+        column = 0;
+      }
+      layoutItems.push({
+        id: panel.section.id,
+        left: 0,
+        top: y,
+        width: containerWidth,
+        height: DEFAULT_LAYOUT_ITEM_HEIGHT,
+      });
+      y += DEFAULT_LAYOUT_ITEM_HEIGHT + columnGap;
+      return;
+    }
+
+    layoutItems.push({
+      id: panel.section.id,
+      left: column * (columnWidth + columnGap),
+      top: y,
+      width: columnWidth,
+      height: DEFAULT_LAYOUT_ITEM_HEIGHT,
+    });
+
+    if (column === 0) {
+      column = 1;
+    } else {
+      column = 0;
+      y += DEFAULT_LAYOUT_ITEM_HEIGHT + columnGap;
+    }
+  });
+
+  return layoutItems;
+}
+
+function normalizeStoredLayout(item, fallback, containerWidth) {
+  if (!item) return fallback;
+
+  if (Number.isFinite(item.left) && Number.isFinite(item.top)) {
+    return {
+      id: fallback.id,
+      left: Math.max(0, Math.min(containerWidth - 80, item.left)),
+      top: Math.max(0, item.top),
+      width: Math.max(120, Math.min(containerWidth, item.width ?? fallback.width)),
+      height: Math.max(120, item.height ?? fallback.height),
+    };
+  }
+
+  const columnGap = DEFAULT_LAYOUT_GAP;
+  const columnWidth = (containerWidth - columnGap) / 2;
+  return {
+    id: fallback.id,
+    left: Math.max(0, Math.min(containerWidth - 80, (item.x ?? 0) * (columnWidth + columnGap))),
+    top: Math.max(0, (item.y ?? 0) * LAYOUT_ROW_HEIGHT),
+    width: Math.max(120, Math.min(containerWidth, (item.w ?? 1) * columnWidth + Math.max(0, (item.w ?? 1) - 1) * columnGap)),
+    height: Math.max(120, (item.h ?? DEFAULT_BLOCK_ROWS) * LAYOUT_ROW_HEIGHT),
+  };
+}
+
+function copyLayoutMap(layout = {}) {
+  return Object.fromEntries(Object.entries(layout ?? {}).map(([id, item]) => [id, { ...item }]));
+}
+
 function App() {
   const [settings, setSettings] = useState(readStoredSettings);
   const [view, setView] = useState('home');
-  const [consoleUnlocked, setConsoleUnlocked] = useState(false);
+  const [consoleUnlocked, setConsoleUnlocked] = useState(() => window.sessionStorage.getItem(CONSOLE_SESSION_KEY) === 'true');
   const [layoutDragging, setLayoutDragging] = useState(false);
   const [layoutSaved, setLayoutSaved] = useState(false);
+  const [layoutIssues, setLayoutIssues] = useState([]);
+  const [layoutDraft, setLayoutDraft] = useState(() => copyLayoutMap(settings.layout));
 
   useEffect(() => {
     window.localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
@@ -278,10 +408,9 @@ function App() {
   };
   const updateLayout = (layout) => {
     setLayoutSaved(false);
-    setSettings((current) => ({
-      ...current,
-      layout: Object.fromEntries(layout.map((item) => [item.i, item])),
-    }));
+    const issues = findLayoutOverlaps(layout);
+    setLayoutIssues(issues);
+    setLayoutDraft(Object.fromEntries(layout.map((item) => [item.id, item])));
   };
   const updateSection = (sectionId, patch) => {
     setSettings((current) => ({
@@ -297,7 +426,7 @@ function App() {
       ),
     }));
   };
-  const addSection = ({ titleZh, titleEn, order }) => {
+  const addSection = ({ titleZh, titleEn }) => {
     setSettings((current) => ({
       ...current,
       sections: [
@@ -305,7 +434,7 @@ function App() {
         {
           id: `section-${Date.now()}`,
           visible: true,
-          order: Number(order) || current.sections.length + 1,
+          order: Math.max(0, ...current.sections.map((section) => Number(section.order ?? 0))) + 1,
           title: { zh: titleZh || '新板块', en: titleEn || 'New Section' },
         },
       ],
@@ -326,7 +455,7 @@ function App() {
       ),
     }));
   };
-  const addItem = ({ sectionId, titleZh, titleEn, descriptionZh, descriptionEn, type, order }) => {
+  const addItem = ({ sectionId, titleZh, titleEn, descriptionZh, descriptionEn, type }) => {
     setSettings((current) => ({
       ...current,
       items: [
@@ -336,7 +465,7 @@ function App() {
           section: sectionId,
           type: type || 'text',
           visible: true,
-          order: Number(order) || current.items.filter((item) => item.section === sectionId).length + 1,
+          order: Math.max(0, ...current.items.filter((item) => item.section === sectionId).map((item) => Number(item.order ?? 0))) + 1,
           title: { zh: titleZh || '新条目', en: titleEn || 'New Item' },
           description: { zh: descriptionZh || '', en: descriptionEn || '' },
         },
@@ -364,6 +493,32 @@ function App() {
       items: current.items.map((item) => (item.id === itemId ? { ...item, visible: item.visible === false } : item)),
     }));
   };
+  const saveContentSort = ({ sections, items }) => {
+    setSettings((current) => ({
+      ...current,
+      sections: resequence(sections).map((section) => {
+        const existing = current.sections.find((record) => record.id === section.id);
+        return existing ? { ...existing, order: section.order } : section;
+      }),
+      items: current.items.map((item) => {
+        const sortedItem = items.find((record) => record.id === item.id);
+        return sortedItem ? { ...item, order: sortedItem.order } : item;
+      }),
+    }));
+  };
+  const enterLayoutMode = () => {
+    setLayoutDraft(copyLayoutMap(settings.layout));
+    setLayoutSaved(false);
+    setLayoutIssues([]);
+    setView('home');
+  };
+  const exitLayoutMode = () => {
+    setLayoutDraft(copyLayoutMap(settings.layout));
+    setLayoutSaved(false);
+    setLayoutIssues([]);
+    updateSettings({ editMode: false });
+    setView('console');
+  };
 
   if (view === 'console') {
     return (
@@ -377,13 +532,15 @@ function App() {
           updateSettings({ editMode: false });
           setView('home');
         }}
-        onEnterLayout={() => setView('home')}
+        onEnterLayout={enterLayoutMode}
         initialUnlocked={consoleUnlocked}
-        onUnlock={() => setConsoleUnlocked(true)}
+        onUnlock={() => {
+          window.sessionStorage.setItem(CONSOLE_SESSION_KEY, 'true');
+          setConsoleUnlocked(true);
+        }}
         onUpdate={updateSettings}
         onUpdateHero={updateHero}
         onUpdateHeroText={updateHeroText}
-        onUpdateSection={updateSection}
         onUpdateSectionTitle={updateSectionTitle}
         onAddSection={addSection}
         onDeleteSection={deleteSection}
@@ -393,6 +550,7 @@ function App() {
         onUpdateItemText={updateItemText}
         onDeleteItem={deleteItem}
         onToggleItem={toggleItem}
+        onSaveContentSort={saveContentSort}
         onReset={() => setSettings(buildDefaultSettings())}
       />
     );
@@ -409,17 +567,45 @@ function App() {
               <strong>{text.layoutModeActive}</strong>
             </div>
             <div className="d-flex flex-wrap gap-2 justify-content-end">
-              <button className="btn btn-outline-primary btn-sm" type="button" onClick={() => setLayoutSaved(true)}>
-                {text.saveLayout}
+              <button
+                className="btn btn-outline-primary btn-icon btn-sm order-3"
+                type="button"
+                aria-label={text.saveLayout}
+                title={text.saveLayout}
+                onClick={() => {
+                  const layoutItems = Object.values(layoutDraft ?? {});
+                  const issues = findLayoutOverlaps(layoutItems);
+                  if (issues.length) {
+                    setLayoutSaved(false);
+                    setLayoutIssues(issues);
+                    return;
+                  }
+                  updateSettings({ layout: copyLayoutMap(layoutDraft) });
+                  setLayoutIssues([]);
+                  setLayoutSaved(true);
+                }}
+              >
+                <Check size={16} />
               </button>
-              <button className="btn btn-outline-secondary btn-sm" type="button" onClick={() => updateSettings({ layout: {} })}>
-                {text.resetLayout}
+              <button className="btn btn-outline-secondary btn-sm order-1 layout-default-button" type="button" data-label={text.defaultLayout} onClick={() => { setLayoutSaved(false); setLayoutIssues([]); setLayoutDraft({}); }}>
+                {text.defaultLayout}
               </button>
-              <button className="btn btn-primary btn-sm" type="button" onClick={() => { updateSettings({ editMode: false }); setView('console'); }}>
-                {text.exitLayoutMode}
+              <button
+                className="btn btn-outline-danger btn-icon btn-sm order-2"
+                type="button"
+                aria-label={text.exitLayoutMode}
+                title={text.exitLayoutMode}
+                onClick={exitLayoutMode}
+              >
+                <X size={16} />
               </button>
             </div>
             {layoutSaved && <span className="layout-save-state">{text.saved}</span>}
+          </div>
+        )}
+        {settings.editMode && (
+          <div className={`layout-issue-box mb-3 ${layoutIssues.length ? 'has-issue' : ''}`}>
+            {layoutIssues.length ? formatLayoutIssue(layoutIssues, text) : text.layoutNoOverlap}
           </div>
         )}
         {settings.hero.visible && (
@@ -433,9 +619,10 @@ function App() {
           items={visibleItems}
           language={settings.language}
           editMode={settings.editMode}
-          layout={settings.layout}
+          layout={settings.editMode ? layoutDraft : settings.layout}
           onLayoutChange={updateLayout}
           onDragStateChange={setLayoutDragging}
+          onLayoutIssueChange={setLayoutIssues}
         />
       </main>
     </div>
@@ -516,7 +703,7 @@ function Hero({ hero, language }) {
   );
 }
 
-function Dashboard({ sections, items, language, editMode, layout, onLayoutChange, onDragStateChange }) {
+function Dashboard({ sections, items, language, editMode, layout, onLayoutChange, onDragStateChange, onLayoutIssueChange }) {
   const panels = sections
     .filter((section) => section.visible !== false)
     .map((section, index) => ({
@@ -527,172 +714,21 @@ function Dashboard({ sections, items, language, editMode, layout, onLayoutChange
     .filter((panel) => panel.items.length > 0);
 
   if (editMode) {
-    const containerWidth = typeof document === 'undefined'
-      ? null
-      : document.querySelector('.site-shell main.container')?.clientWidth;
-    const gridWidth = containerWidth ?? (typeof window === 'undefined' ? 960 : Math.min(Math.max(window.innerWidth - 48, 320), 1320));
-    let nextY = 0;
-    let nextColumn = 0;
-    const gridLayout = panels.map((panel) => {
-      if (layout[panel.section.id]) {
-        return layout[panel.section.id];
-      }
-
-      const wide = panel.section.id === 'profile' || panel.section.id === 'timeline';
-      if (wide) {
-        if (nextColumn !== 0) {
-          nextY += 3;
-          nextColumn = 0;
-        }
-        const item = {
-          i: panel.section.id,
-          x: 0,
-          y: nextY,
-          w: 2,
-          h: 3,
-          minW: 1,
-          minH: 2,
-          resizeHandles: ['s', 'w', 'e', 'n', 'sw', 'nw', 'se', 'ne'],
-        };
-        nextY += 3;
-        return item;
-      }
-
-      const item = {
-        i: panel.section.id,
-        x: nextColumn,
-        y: nextY,
-        w: 1,
-        h: 3,
-        minW: 1,
-        minH: 2,
-        resizeHandles: ['s', 'w', 'e', 'n', 'sw', 'nw', 'se', 'ne'],
-      };
-      if (nextColumn === 0) {
-        nextColumn = 1;
-      } else {
-        nextColumn = 0;
-        nextY += 3;
-      }
-      return item;
-    });
-
-    const moveLinkedBelow = (items, target, oldBottom, delta) => {
-      if (delta === 0) return items;
-      const overlapsX = (item) => item.x < target.x + target.w && item.x + item.w > target.x;
-      return items.map((item) => {
-        if (item.i !== target.i && item.y >= oldBottom && overlapsX(item)) {
-          return { ...item, y: Math.max(0, item.y + delta) };
-        }
-        return item;
-      });
-    };
-
-    const overlaps = (a, b) =>
-      a.i !== b.i &&
-      a.x < b.x + b.w &&
-      a.x + a.w > b.x &&
-      a.y < b.y + b.h &&
-      a.y + a.h > b.y;
-
-    const normalizeLayout = (items) => {
-      const next = items
-        .map((item) => ({
-          ...item,
-          x: Math.max(0, Math.min(1, item.x)),
-          w: Math.max(1, Math.min(2, item.w)),
-          y: Math.max(0, item.y),
-          h: Math.max(2, item.h),
-        }))
-        .map((item) => (item.x + item.w > 2 ? { ...item, x: 2 - item.w } : item))
-        .sort((a, b) => a.y - b.y || a.x - b.x);
-
-      let changed = true;
-      let guard = 0;
-      while (changed && guard < 80) {
-        changed = false;
-        guard += 1;
-
-        for (const item of next) {
-          while (next.some((other) => overlaps(item, other))) {
-            item.y += 1;
-            changed = true;
-          }
-        }
-      }
-
-      return next;
-    };
-
-    const renderedLayout = normalizeLayout(gridLayout);
-
-    const adjustLayout = (sectionId, action) => {
-      const current = renderedLayout.map((item) => ({ ...item }));
-      const target = current.find((item) => item.i === sectionId);
-      if (!target) return;
-
-      const oldBottom = target.y + target.h;
-      if (action === 'left-out' && target.x > 0) {
-        target.x -= 1;
-        target.w += 1;
-      }
-      if (action === 'left-in' && target.x === 0 && target.w > 1) {
-        target.x += 1;
-        target.w -= 1;
-      }
-      if (action === 'right-in' && target.w > 1) {
-        target.w -= 1;
-      }
-      if (action === 'right-out' && target.x + target.w < 2) {
-        target.w += 1;
-      }
-      if (action === 'top-up' && target.y > 0) {
-        target.y -= 1;
-        target.h += 1;
-      }
-      if (action === 'top-down' && target.h > 2) {
-        target.y += 1;
-        target.h -= 1;
-      }
-      if (action === 'bottom-down') {
-        target.h += 1;
-        onLayoutChange(normalizeLayout(moveLinkedBelow(current, target, oldBottom, 1)));
-        return;
-      }
-      if (action === 'bottom-up' && target.h > 2) {
-        target.h -= 1;
-        onLayoutChange(normalizeLayout(moveLinkedBelow(current, target, oldBottom, -1)));
-        return;
-      }
-      onLayoutChange(normalizeLayout(current));
-    };
-
     return (
-      <GridLayout
-        className="layout-grid"
-        cols={2}
-        rowHeight={96}
-        margin={[16, 16]}
-        width={gridWidth}
-        layout={renderedLayout}
+      <MoveableDashboard
+        panels={panels}
+        language={language}
+        layout={layout}
         onLayoutChange={onLayoutChange}
-        compactType={null}
-        preventCollision={false}
-        onDragStart={() => onDragStateChange(true)}
-        onDragStop={() => onDragStateChange(false)}
-        onResizeStart={() => onDragStateChange(true)}
-        onResizeStop={() => onDragStateChange(false)}
-        isDraggable={false}
-        isResizable={false}
-        draggableHandle=".panel-drag-handle"
-      >
-        {panels.map((panel) => (
-          <div key={panel.section.id}>
-            <SectionPanel panel={panel} language={language} editMode onLayoutAdjust={adjustLayout} />
-          </div>
-        ))}
-      </GridLayout>
+        onDragStateChange={onDragStateChange}
+        onLayoutIssueChange={onLayoutIssueChange}
+      />
     );
+
+  }
+
+  if (Object.keys(layout ?? {}).length > 0) {
+    return <StaticLayoutDashboard panels={panels} language={language} layout={layout} />;
   }
 
   return (
@@ -704,48 +740,149 @@ function Dashboard({ sections, items, language, editMode, layout, onLayoutChange
   );
 }
 
-function SectionPanel({ panel, language, editMode = false, onLayoutAdjust }) {
+function StaticLayoutDashboard({ panels, language, layout }) {
+  const canvasRef = useRef(null);
+  const containerWidth = canvasRef.current?.clientWidth
+    ?? document.querySelector('.site-shell main.container')?.clientWidth
+    ?? Math.min(Math.max(window.innerWidth - 48, 320), 1320);
+  const defaultLayout = buildDefaultPixelLayout(panels, containerWidth);
+  const renderedLayout = defaultLayout.map((fallback) => normalizeStoredLayout(layout[fallback.id], fallback, containerWidth));
+  const canvasHeight = Math.max(...renderedLayout.map((item) => item.top + item.height), 0) + DEFAULT_LAYOUT_GAP;
+
+  return (
+    <div className="static-layout-canvas" ref={canvasRef} style={{ minHeight: canvasHeight }}>
+      {panels.map((panel) => {
+        const item = renderedLayout.find((layoutItem) => layoutItem.id === panel.section.id);
+        return (
+          <div
+            className="static-layout-panel"
+            key={panel.section.id}
+            style={{
+              width: item.width,
+              height: item.height,
+              transform: `translate(${item.left}px, ${item.top}px)`,
+            }}
+          >
+            <SectionPanel panel={panel} language={language} />
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function MoveableDashboard({ panels, language, layout, onLayoutChange, onDragStateChange, onLayoutIssueChange }) {
+  const canvasRef = useRef(null);
+  const targetsRef = useRef({});
+  const liveLayoutRef = useRef([]);
+  const [selectedId, setSelectedId] = useState(null);
+  const [selectedTarget, setSelectedTarget] = useState(null);
+
+  const containerWidth = canvasRef.current?.clientWidth
+    ?? document.querySelector('.site-shell main.container')?.clientWidth
+    ?? Math.min(Math.max(window.innerWidth - 48, 320), 1320);
+  const defaultLayout = buildDefaultPixelLayout(panels, containerWidth);
+  const renderedLayout = defaultLayout.map((fallback) => normalizeStoredLayout(layout[fallback.id], fallback, containerWidth));
+  const canvasHeight = Math.max(...renderedLayout.map((item) => item.top + item.height), 0) + DEFAULT_LAYOUT_GAP;
+  liveLayoutRef.current = renderedLayout;
+
+  const syncIssue = (items) => {
+    const issues = findLayoutOverlaps(items);
+    onLayoutIssueChange(issues);
+  };
+
+  const commitLiveLayout = () => {
+    const items = liveLayoutRef.current.map((item) => ({ ...item }));
+    onLayoutChange(items);
+    syncIssue(items);
+  };
+
+  const updateLiveItem = (sectionId, patch) => {
+    liveLayoutRef.current = liveLayoutRef.current.map((item) => (item.id === sectionId ? { ...item, ...patch } : item));
+  };
+
+  return (
+    <div className="moveable-canvas" ref={canvasRef} style={{ minHeight: canvasHeight }}>
+      {panels.map((panel) => {
+        const item = renderedLayout.find((layoutItem) => layoutItem.id === panel.section.id);
+        return (
+          <div
+            className={`moveable-panel ${selectedId === panel.section.id ? 'selected' : ''}`}
+            data-section-id={panel.section.id}
+            key={panel.section.id}
+            ref={(node) => {
+              if (node) targetsRef.current[panel.section.id] = node;
+            }}
+            style={{
+              width: item.width,
+              height: item.height,
+              transform: `translate(${item.left}px, ${item.top}px)`,
+            }}
+            onPointerDown={() => {
+              setSelectedId(panel.section.id);
+              setSelectedTarget(targetsRef.current[panel.section.id]);
+            }}
+          >
+            <SectionPanel panel={panel} language={language} editMode />
+          </div>
+        );
+      })}
+
+      {selectedTarget && (
+        <Moveable
+          target={selectedTarget}
+          container={canvasRef.current}
+          draggable
+          resizable
+          snappable
+          snapThreshold={10}
+          bounds={{ left: 0, top: 0, right: containerWidth }}
+          verticalGuidelines={[0, containerWidth / 2, containerWidth]}
+          horizontalGuidelines={[0, 160, 320, 480, 640, 800, 960, 1120, 1280, 1440, 1600]}
+          elementGuidelines={Object.values(targetsRef.current).filter((target) => target !== selectedTarget)}
+          onDragStart={() => onDragStateChange(true)}
+          onDrag={(event) => {
+            const [left, top] = event.beforeTranslate;
+            const safeTop = Math.max(0, top);
+            event.target.style.transform = `translate(${left}px, ${safeTop}px)`;
+            updateLiveItem(selectedId, { left, top: safeTop });
+          }}
+          onDragEnd={() => {
+            onDragStateChange(false);
+            commitLiveLayout();
+          }}
+          onResizeStart={() => onDragStateChange(true)}
+          onResize={(event) => {
+            const [left, top] = event.drag.beforeTranslate;
+            const width = Math.max(160, event.width);
+            const height = Math.max(140, event.height);
+            const safeTop = Math.max(0, top);
+            event.target.style.width = `${width}px`;
+            event.target.style.height = `${height}px`;
+            event.target.style.transform = `translate(${left}px, ${safeTop}px)`;
+            updateLiveItem(selectedId, { left, top: safeTop, width, height });
+          }}
+          onResizeEnd={() => {
+            onDragStateChange(false);
+            commitLiveLayout();
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+function SectionPanel({ panel, language, editMode = false }) {
   return (
     <section className={`content-panel ${editMode ? 'editable-panel' : ''}`}>
       <div className={`d-flex align-items-start justify-content-between gap-3 mb-3 ${editMode ? 'panel-drag-handle' : ''}`}>
         <h2 className="h4 fw-bold mb-0">{getText(panel.section.title, language)}</h2>
         <span className="section-mark">{sectionNumber(panel.index)}</span>
       </div>
-      {editMode && (
-        <LayoutEdgeControls sectionId={panel.section.id} onAdjust={onLayoutAdjust} />
-      )}
       <div className={panel.section.id === 'timeline' ? 'timeline-list' : 'item-list'}>
         {panel.items.map((item) => <ContentItem item={item} language={language} key={item.id} />)}
       </div>
     </section>
-  );
-}
-
-function LayoutEdgeControls({ sectionId, onAdjust }) {
-  const click = (action) => (event) => {
-    event.stopPropagation();
-    onAdjust(sectionId, action);
-  };
-
-  return (
-    <div className="layout-edge-controls" aria-hidden="true">
-      <div className="edge-control edge-left">
-        <button type="button" onClick={click('left-out')}>←</button>
-        <button type="button" onClick={click('left-in')}>→</button>
-      </div>
-      <div className="edge-control edge-right">
-        <button type="button" onClick={click('right-in')}>←</button>
-        <button type="button" onClick={click('right-out')}>→</button>
-      </div>
-      <div className="edge-control edge-top">
-        <button type="button" onClick={click('top-up')}>↑</button>
-        <button type="button" onClick={click('top-down')}>↓</button>
-      </div>
-      <div className="edge-control edge-bottom">
-        <button type="button" onClick={click('bottom-up')}>↑</button>
-        <button type="button" onClick={click('bottom-down')}>↓</button>
-      </div>
-    </div>
   );
 }
 
@@ -783,7 +920,7 @@ function ContentItem({ item, language }) {
 }
 
 function OwnerConsole(props) {
-  const { settings, sections, items, text, language, onClose, onEnterLayout, initialUnlocked, onUnlock, onUpdate, onUpdateHero, onUpdateHeroText, onUpdateSection, onUpdateSectionTitle, onAddSection, onDeleteSection, onToggleSection, onAddItem, onUpdateItem, onUpdateItemText, onDeleteItem, onToggleItem, onReset } = props;
+  const { settings, sections, items, text, language, onClose, onEnterLayout, initialUnlocked, onUnlock, onUpdate, onUpdateHero, onUpdateHeroText, onUpdateSectionTitle, onAddSection, onDeleteSection, onToggleSection, onAddItem, onUpdateItem, onUpdateItemText, onDeleteItem, onToggleItem, onSaveContentSort, onReset } = props;
   const [password, setPassword] = useState('');
   const [unlocked, setUnlocked] = useState(initialUnlocked);
   const [error, setError] = useState('');
@@ -823,6 +960,7 @@ function OwnerConsole(props) {
         <div className="console-workspace">
           <aside className="console-sidebar">
             <button className={`console-tab ${activeTab === 'content' ? 'active' : ''}`} type="button" onClick={() => setActiveTab('content')}>{text.contentControl}</button>
+            <button className={`console-tab ${activeTab === 'sort' ? 'active' : ''}`} type="button" onClick={() => setActiveTab('sort')}>{text.contentSort}</button>
             <button className={`console-tab ${activeTab === 'visibility' ? 'active' : ''}`} type="button" onClick={() => setActiveTab('visibility')}>{text.visibilityControl}</button>
             <button className={`console-tab ${activeTab === 'layout' ? 'active' : ''}`} type="button" onClick={() => setActiveTab('layout')}>{text.layoutMode}</button>
           </aside>
@@ -839,15 +977,13 @@ function OwnerConsole(props) {
                 onUpdateHero={onUpdateHero}
                 onUpdateHeroText={onUpdateHeroText}
                 onDeleteSection={onDeleteSection}
-                onUpdateSection={onUpdateSection}
                 onUpdateSectionTitle={onUpdateSectionTitle}
-                onToggleSection={onToggleSection}
                 onUpdateItem={onUpdateItem}
                 onUpdateItemText={onUpdateItemText}
                 onDeleteItem={onDeleteItem}
-                onToggleItem={onToggleItem}
               />
             )}
+            {activeTab === 'sort' && <ContentSortControl sections={sections} items={items} text={text} language={language} onSave={onSaveContentSort} />}
             {activeTab === 'visibility' && <VisibilityControl settings={settings} sections={sections} items={items} text={text} language={language} onUpdateHero={onUpdateHero} onToggleSection={onToggleSection} onToggleItem={onToggleItem} />}
             {activeTab === 'layout' && <LayoutControl settings={settings} text={text} onReset={onReset} onEnter={() => { onUpdate({ editMode: true }); onEnterLayout(); }} />}
           </section>
@@ -861,7 +997,15 @@ function OwnerConsole(props) {
   );
 }
 
-function ContentControl({ settings, sections, items, text, language, onOpenModal, onOpenEditor, onUpdateHero, onUpdateHeroText, onDeleteSection, onUpdateSection, onUpdateSectionTitle, onToggleSection, onUpdateItem, onUpdateItemText, onDeleteItem, onToggleItem }) {
+function ContentControl({ settings, sections, items, text, language, onOpenModal, onOpenEditor, onUpdateHero, onUpdateHeroText, onDeleteSection, onUpdateSectionTitle, onUpdateItem, onUpdateItemText, onDeleteItem }) {
+  const [deleteTarget, setDeleteTarget] = useState(null);
+  const closeDeleteModal = () => setDeleteTarget(null);
+  const confirmDelete = () => {
+    if (deleteTarget?.type === 'section') onDeleteSection(deleteTarget.id);
+    if (deleteTarget?.type === 'item') onDeleteItem(deleteTarget.id);
+    closeDeleteModal();
+  };
+
   return (
     <div>
       <div className="console-title-row">
@@ -881,25 +1025,34 @@ function ContentControl({ settings, sections, items, text, language, onOpenModal
               <div className="content-tree-section-head">
                 <div><h4 className="h6 fw-bold mb-1">{getText(section.title, language)}</h4><p className="text-muted small mb-0">{sectionItems.length} {text.itemCount}</p></div>
                 <div className="section-actions">
-                  <SwitchToggle checked={section.visible !== false} label={text.visible} onChange={() => onToggleSection(section.id)} />
                   <button className="btn btn-outline-secondary btn-sm d-inline-flex align-items-center gap-2" type="button" onClick={() => onOpenModal({ type: 'item', sectionId: section.id })}><Plus size={15} /><span>{text.addItem}</span></button>
-                  <button className="btn btn-icon btn-outline-danger btn-sm" type="button" aria-label={text.deleteSection} onClick={() => onDeleteSection(section.id)}><Trash2 size={15} /></button>
+                  <button className="btn btn-icon btn-outline-danger btn-sm" type="button" aria-label={text.deleteSection} onClick={() => setDeleteTarget({ type: 'section', id: section.id, name: getText(section.title, language) })}><Trash2 size={15} /></button>
                 </div>
               </div>
               <div className="row g-3 mb-3">
-                <div className="col-md-2"><label className="form-label">{text.order}</label><input className="form-control" type="number" value={section.order} onChange={(event) => onUpdateSection(section.id, { order: Number(event.target.value) })} /></div>
-                <div className="col-md-5"><label className="form-label">{text.titleZh}</label><input className="form-control" value={section.title.zh} onChange={(event) => onUpdateSectionTitle(section.id, 'zh', event.target.value)} /></div>
-                <div className="col-md-5"><label className="form-label">{text.titleEn}</label><input className="form-control" value={section.title.en} onChange={(event) => onUpdateSectionTitle(section.id, 'en', event.target.value)} /></div>
+                <div className="col-md-6"><label className="form-label">{text.titleZh}</label><input className="form-control" value={section.title.zh} onChange={(event) => onUpdateSectionTitle(section.id, 'zh', event.target.value)} /></div>
+                <div className="col-md-6"><label className="form-label">{text.titleEn}</label><input className="form-control" value={section.title.en} onChange={(event) => onUpdateSectionTitle(section.id, 'en', event.target.value)} /></div>
               </div>
               <div className="content-tree-items">
                 {sectionItems.length === 0 ? <p className="text-muted small mb-0">{text.noItems}</p> : sectionItems.map((item) => (
-                  <ItemEditor item={item} text={text} onOpenEditor={onOpenEditor} onUpdateItem={onUpdateItem} onUpdateItemText={onUpdateItemText} onDeleteItem={onDeleteItem} onToggleItem={onToggleItem} key={item.id} />
+                  <ItemEditor item={item} text={text} language={language} onOpenEditor={onOpenEditor} onUpdateItem={onUpdateItem} onUpdateItemText={onUpdateItemText} onRequestDelete={(target) => setDeleteTarget(target)} key={item.id} />
                 ))}
               </div>
             </article>
           );
         })}
       </div>
+      {deleteTarget && (
+        <ConfirmModal
+          text={text}
+          title={text.confirmDeleteTitle}
+          message={text.confirmDeleteMessage.replace('{name}', deleteTarget.name)}
+          confirmLabel={text.confirmDelete}
+          confirmClassName="btn-danger"
+          onClose={closeDeleteModal}
+          onConfirm={confirmDelete}
+        />
+      )}
     </div>
   );
 }
@@ -909,7 +1062,6 @@ function HeroEditor({ settings, text, language, onUpdateHero, onUpdateHeroText, 
     <article className="content-tree-section">
       <div className="content-tree-section-head">
         <div><h4 className="h6 fw-bold mb-1">{text.heroBlock}</h4><p className="text-muted small mb-0">{getText(settings.hero.title, language)}</p></div>
-        <SwitchToggle checked={settings.hero.visible !== false} label={text.visible} onChange={() => onUpdateHero({ visible: settings.hero.visible === false })} />
       </div>
       <div className="row g-3">
         <div className="col-md-6"><label className="form-label">{text.titleZh}</label><input className="form-control" value={settings.hero.title.zh} onChange={(event) => onUpdateHeroText('title', 'zh', event.target.value)} /></div>
@@ -922,21 +1074,19 @@ function HeroEditor({ settings, text, language, onUpdateHero, onUpdateHeroText, 
   );
 }
 
-function ItemEditor({ item, text, onOpenEditor, onUpdateItem, onUpdateItemText, onDeleteItem, onToggleItem }) {
+function ItemEditor({ item, text, language, onOpenEditor, onUpdateItem, onUpdateItemText, onRequestDelete }) {
   return (
     <article className="item-editor">
       <div className="item-editor-head">
         <strong>{getText(item.title, 'zh') || getText(item.title, 'en')}</strong>
         <div className="section-actions">
-          <SwitchToggle checked={item.visible !== false} label={text.visible} onChange={() => onToggleItem(item.id)} />
-          <button className="btn btn-icon btn-outline-danger btn-sm" type="button" aria-label={text.deleteItem} onClick={() => onDeleteItem(item.id)}><Trash2 size={15} /></button>
+          <button className="btn btn-icon btn-outline-danger btn-sm" type="button" aria-label={text.deleteItem} onClick={() => onRequestDelete({ type: 'item', id: item.id, name: getText(item.title, language) })}><Trash2 size={15} /></button>
         </div>
       </div>
       <div className="row g-3">
-        <div className="col-md-2"><label className="form-label">{text.order}</label><input className="form-control" type="number" value={item.order} onChange={(event) => onUpdateItem(item.id, { order: Number(event.target.value) })} /></div>
         <div className="col-md-3"><label className="form-label">{text.type}</label><select className="form-select" value={item.type} onChange={(event) => onUpdateItem(item.id, { type: event.target.value })}><option value="text">{text.textType}</option><option value="project">{text.projectType}</option><option value="timeline">{text.timelineType}</option></select></div>
-        <div className="col-md-3"><label className="form-label">{text.titleZh}</label><input className="form-control" value={item.title.zh} onChange={(event) => onUpdateItemText(item.id, 'title', 'zh', event.target.value)} /></div>
-        <div className="col-md-4"><label className="form-label">{text.titleEn}</label><input className="form-control" value={item.title.en} onChange={(event) => onUpdateItemText(item.id, 'title', 'en', event.target.value)} /></div>
+        <div className="col-md-4"><label className="form-label">{text.titleZh}</label><input className="form-control" value={item.title.zh} onChange={(event) => onUpdateItemText(item.id, 'title', 'zh', event.target.value)} /></div>
+        <div className="col-md-5"><label className="form-label">{text.titleEn}</label><input className="form-control" value={item.title.en} onChange={(event) => onUpdateItemText(item.id, 'title', 'en', event.target.value)} /></div>
         <MarkdownTextControl label={text.descriptionZh} value={item.description.zh} onChange={(value) => onUpdateItemText(item.id, 'description', 'zh', value)} onOpenEditor={() => onOpenEditor({ title: text.descriptionZh, value: item.description.zh, onSave: (value) => onUpdateItemText(item.id, 'description', 'zh', value) })} />
         <MarkdownTextControl label={text.descriptionEn} value={item.description.en} onChange={(value) => onUpdateItemText(item.id, 'description', 'en', value)} onOpenEditor={() => onOpenEditor({ title: text.descriptionEn, value: item.description.en, onSave: (value) => onUpdateItemText(item.id, 'description', 'en', value) })} />
       </div>
@@ -952,6 +1102,151 @@ function MarkdownTextControl({ label, value, onChange, onOpenEditor }) {
         <textarea className="form-control" rows="2" value={value} onChange={(event) => onChange(event.target.value)} />
         <button className="btn btn-outline-secondary" type="button" onClick={onOpenEditor}><Edit3 size={16} /></button>
       </div>
+    </div>
+  );
+}
+
+function ContentSortControl({ sections, items, text, language, onSave }) {
+  const [sectionDraft, setSectionDraft] = useState(() => resequence(sortByOrder(sections)));
+  const [itemDraft, setItemDraft] = useState(() => sortItemsForDraft(items));
+  const [openSectionId, setOpenSectionId] = useState(sectionDraft[0]?.id ?? '');
+  const [saved, setSaved] = useState(false);
+
+  useEffect(() => {
+    const nextSections = resequence(sortByOrder(sections));
+    setSectionDraft(nextSections);
+    setItemDraft(sortItemsForDraft(items));
+    setOpenSectionId((current) => current || nextSections[0]?.id || '');
+  }, [sections, items]);
+
+  const resetDraft = () => {
+    const nextSections = resequence(sortByOrder(sections));
+    setSectionDraft(nextSections);
+    setItemDraft(sortItemsForDraft(items));
+    setOpenSectionId(nextSections[0]?.id ?? '');
+    setSaved(false);
+  };
+
+  const saveDraft = () => {
+    const nextSections = resequence(sectionDraft);
+    const nextItems = Object.values(itemDraft).flatMap((sectionItems) => resequence(sectionItems));
+    onSave({ sections: nextSections, items: nextItems });
+    setSectionDraft(nextSections);
+    setItemDraft((current) => Object.fromEntries(Object.entries(current).map(([sectionId, sectionItems]) => [sectionId, resequence(sectionItems)])));
+    setSaved(true);
+  };
+
+  return (
+    <div>
+      <div className="console-title-row">
+        <div>
+          <h3 className="h5 fw-bold mb-1">{text.contentSort}</h3>
+          <p className="text-muted mb-0">{text.dragToSort}</p>
+        </div>
+        <div className="section-actions">
+          <button className="btn btn-outline-danger btn-icon" type="button" aria-label={text.cancel} title={text.cancel} onClick={resetDraft}><X size={17} /></button>
+          <button className="btn btn-outline-primary btn-icon" type="button" aria-label={text.save} title={text.save} onClick={saveDraft}><Check size={17} /></button>
+        </div>
+      </div>
+
+      {saved && <p className="layout-save-state static mb-3">{text.sortSaved}</p>}
+
+      <div className="sort-tree">
+        {sectionDraft.map((section, index) => {
+          const sectionItems = itemDraft[section.id] ?? [];
+          const open = openSectionId === section.id;
+          return (
+            <article className="sort-section" key={section.id}>
+              <SortRow
+                label={getText(section.title, language)}
+                meta={`${sectionNumber(index)} · ${sectionItems.length} ${text.itemCount}`}
+                open={open}
+                draggable
+                onToggle={() => setOpenSectionId(open ? '' : section.id)}
+                scope="sections"
+                onMove={(from, to) => {
+                  setSectionDraft((current) => moveRecord(current, from, to));
+                  setSaved(false);
+                }}
+                index={index}
+              />
+              {open && (
+                <div className="sort-items">
+                  {sectionItems.length === 0 ? <p className="text-muted small mb-0">{text.noItems}</p> : sectionItems.map((item, itemIndex) => (
+                    <SortRow
+                      label={getText(item.title, language)}
+                      meta={sectionNumber(itemIndex)}
+                      draggable
+                      compact
+                      scope={`items-${section.id}`}
+                      onMove={(from, to) => {
+                        setItemDraft((current) => ({
+                          ...current,
+                          [section.id]: moveRecord(current[section.id] ?? [], from, to),
+                        }));
+                        setSaved(false);
+                      }}
+                      index={itemIndex}
+                      key={item.id}
+                    />
+                  ))}
+                </div>
+              )}
+            </article>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function sortItemsForDraft(items) {
+  return items.reduce((groups, item) => {
+    const sectionItems = groups[item.section] ?? [];
+    return { ...groups, [item.section]: resequence(sortByOrder([...sectionItems, item])) };
+  }, {});
+}
+
+function moveRecord(records, fromIndex, toIndex) {
+  if (fromIndex === toIndex || fromIndex < 0 || toIndex < 0) return records;
+  const next = [...records];
+  const [moved] = next.splice(fromIndex, 1);
+  next.splice(toIndex, 0, moved);
+  return resequence(next);
+}
+
+function SortRow({ label, meta, open = false, compact = false, draggable = false, index, scope, onToggle, onMove }) {
+  const handleDragStart = (event) => {
+    event.dataTransfer.effectAllowed = 'move';
+    event.dataTransfer.setData('application/x-my-web-sort', JSON.stringify({ index, scope }));
+  };
+
+  const handleDrop = (event) => {
+    event.preventDefault();
+    const payload = event.dataTransfer.getData('application/x-my-web-sort');
+    if (!payload) return;
+    try {
+      const { index: from, scope: sourceScope } = JSON.parse(payload);
+      if (sourceScope === scope && Number.isFinite(from)) onMove(from, index);
+    } catch {
+      // Ignore drops from outside the sorting list.
+    }
+  };
+
+  return (
+    <div
+      className={`sort-row ${compact ? 'compact' : ''}`}
+      draggable={draggable}
+      onDragStart={handleDragStart}
+      onDragOver={(event) => event.preventDefault()}
+      onDrop={handleDrop}
+    >
+      <button className="btn btn-icon btn-sm btn-outline-secondary sort-toggle" type="button" onClick={onToggle} aria-label={label}>
+        {onToggle ? (open ? <ChevronDown size={15} /> : <ChevronRight size={15} />) : <GripVertical size={15} />}
+      </button>
+      <GripVertical className="sort-grip" size={16} aria-hidden="true" />
+      <span className="sort-label">{label}</span>
+      <span className="sort-meta">{meta}</span>
     </div>
   );
 }
@@ -1005,15 +1300,13 @@ function LayoutControl({ settings, text, onReset, onEnter }) {
 function AddSectionModal({ text, onCreate, onClose }) {
   const [titleZh, setTitleZh] = useState('');
   const [titleEn, setTitleEn] = useState('');
-  const [order, setOrder] = useState('');
   return (
     <div className="custom-modal-backdrop">
-      <form className="custom-modal" onSubmit={(event) => { event.preventDefault(); onCreate({ titleZh, titleEn, order }); }}>
+      <form className="custom-modal" onSubmit={(event) => { event.preventDefault(); onCreate({ titleZh, titleEn }); }}>
         <ModalHeader title={text.addSection} text={text} onClose={onClose} />
         <div className="row g-3">
           <div className="col-md-6"><label className="form-label">{text.titleZh}</label><input className="form-control" value={titleZh} onChange={(event) => setTitleZh(event.target.value)} autoFocus /></div>
           <div className="col-md-6"><label className="form-label">{text.titleEn}</label><input className="form-control" value={titleEn} onChange={(event) => setTitleEn(event.target.value)} /></div>
-          <div className="col-md-4"><label className="form-label">{text.order}</label><input className="form-control" type="number" value={order} onChange={(event) => setOrder(event.target.value)} /></div>
         </div>
         <ModalActions text={text} onClose={onClose} />
       </form>
@@ -1027,14 +1320,12 @@ function AddItemModal({ text, sectionId, onCreate, onClose }) {
   const [descriptionZh, setDescriptionZh] = useState('');
   const [descriptionEn, setDescriptionEn] = useState('');
   const [type, setType] = useState('text');
-  const [order, setOrder] = useState('');
   return (
     <div className="custom-modal-backdrop">
-      <form className="custom-modal large" onSubmit={(event) => { event.preventDefault(); onCreate({ sectionId, titleZh, titleEn, descriptionZh, descriptionEn, type, order }); }}>
+      <form className="custom-modal large" onSubmit={(event) => { event.preventDefault(); onCreate({ sectionId, titleZh, titleEn, descriptionZh, descriptionEn, type }); }}>
         <ModalHeader title={text.addItem} text={text} onClose={onClose} />
         <div className="row g-3">
           <div className="col-md-4"><label className="form-label">{text.type}</label><select className="form-select" value={type} onChange={(event) => setType(event.target.value)}><option value="text">{text.textType}</option><option value="project">{text.projectType}</option><option value="timeline">{text.timelineType}</option></select></div>
-          <div className="col-md-4"><label className="form-label">{text.order}</label><input className="form-control" type="number" value={order} onChange={(event) => setOrder(event.target.value)} /></div>
           <div className="col-md-6"><label className="form-label">{text.titleZh}</label><input className="form-control" value={titleZh} onChange={(event) => setTitleZh(event.target.value)} autoFocus /></div>
           <div className="col-md-6"><label className="form-label">{text.titleEn}</label><input className="form-control" value={titleEn} onChange={(event) => setTitleEn(event.target.value)} /></div>
           <div className="col-md-6"><label className="form-label">{text.descriptionZh}</label><textarea className="form-control" rows="3" value={descriptionZh} onChange={(event) => setDescriptionZh(event.target.value)} /></div>
@@ -1119,12 +1410,27 @@ function AttachmentToolbarButton({ editorRef }) {
   );
 }
 
-function ModalHeader({ title, text, onClose }) {
-  return <div className="custom-modal-head"><h3 className="h5 fw-bold mb-0">{title}</h3><button className="btn btn-icon btn-outline-secondary" type="button" aria-label={text.close} onClick={onClose}><X size={18} /></button></div>;
+function ModalHeader({ title, text, onClose, titleId }) {
+  return <div className="custom-modal-head"><h3 className="h5 fw-bold mb-0" id={titleId}>{title}</h3><button className="btn btn-icon btn-outline-secondary" type="button" aria-label={text.close} onClick={onClose}><X size={18} /></button></div>;
 }
 
 function ModalActions({ text, onClose }) {
   return <div className="custom-modal-actions"><button className="btn btn-outline-secondary" type="button" onClick={onClose}>{text.cancel}</button><button className="btn btn-primary" type="submit">{text.create}</button></div>;
+}
+
+function ConfirmModal({ text, title, message, confirmLabel, confirmClassName = 'btn-primary', onClose, onConfirm }) {
+  return (
+    <div className="custom-modal-backdrop">
+      <div className="custom-modal" role="alertdialog" aria-modal="true" aria-labelledby="confirm-title">
+        <ModalHeader title={title} text={text} onClose={onClose} titleId="confirm-title" />
+        <p className="mb-0">{message}</p>
+        <div className="custom-modal-actions">
+          <button className="btn btn-outline-secondary" type="button" onClick={onClose}>{text.cancel}</button>
+          <button className={`btn ${confirmClassName}`} type="button" onClick={onConfirm}>{confirmLabel}</button>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 function SwitchRow({ label, checked, onChange, disabled = false }) {
